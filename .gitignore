@@ -1,0 +1,19 @@
+# Secrets and local auth
+.env
+.env.*
+!.env.example
+.spotify_cache
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool/editor noise
+.DS_Store
+.vscode/
