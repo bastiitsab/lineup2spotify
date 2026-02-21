@@ -69,6 +69,7 @@ PLAYLIST_COVER_IMAGE=path/to/lineup.jpeg
 PLAYLIST_DESCRIPTION=Auto-generated festival playlist
 SHUFFLE_TRACKS=false
 DRY_RUN=false
+FORCE_RECREATE=false
 ```
 
 Relative paths are resolved from the script folder, for example:
@@ -87,8 +88,9 @@ What happens:
 - Installs Python dependencies
 - Opens Spotify login/consent in your browser (interactive PKCE)
 - Derives playlist name from the first `#` heading in `bands.md`
-- Removes your existing playlist(s) with that derived playlist name
-- Creates a fresh public playlist
+- If a playlist with that name already exists and has the same tracks, it is left unchanged (cover image is still uploaded if configured)
+- If a playlist exists but tracks differ, tracks are replaced in-place — preserving the playlist ID, URL, followers, and likes
+- If no playlist exists, a fresh public playlist is created
 - Uploads a cover image if `PLAYLIST_COVER_IMAGE` is set
 - Prints the playlist URL
 
@@ -100,11 +102,14 @@ What happens:
   - no exact Spotify artist match
   - intentionally skipped bands
 - Spotify artist links are written into `bands.md` for each matched band.
+- The Spotify playlist URL is appended to `bands.md` after creation or update.
 - Intentional skip control comes from `bands.md`: add the configured `SKIPPED_HINT_TEXT` to a band line to skip it.
+- Override the track count per artist by adding a number in parentheses: `- Kärbholz (10)` gives that artist 10 tracks instead of the default.
 - Set `SHUFFLE_TRACKS=true` to randomize track order instead of grouping by artist.
 - Set `PLAYLIST_COVER_IMAGE` to upload a cover image (e.g. the lineup poster) to the playlist. The `ugc-image-upload` scope is added automatically.
 - Set `PLAYLIST_DESCRIPTION` to add a custom description to the playlist.
 - Set `DRY_RUN=true` to preview matched/unmatched artists and track counts without creating or modifying anything.
+- Set `FORCE_RECREATE=true` to delete and recreate the playlist even if it already exists (useful with `SHUFFLE_TRACKS=true` for a new track order).
 - `.env` and `.spotify_cache` are ignored via `.gitignore` and should not be committed.
 
 ## Reuse for other festivals

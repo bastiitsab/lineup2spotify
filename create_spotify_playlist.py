@@ -91,19 +91,32 @@ def derive_playlist_name(markdown_path: Path) -> str:
     return f"{title} - Top 5 je Band"
 
 
-def load_bands(markdown_path: Path, not_found_hint: str, skipped_hint: str) -> tuple[list[str], set[str]]:
+def parse_band_entry(name: str) -> tuple[str, int | None]:
+    match = re.match(r"^(.+?)\s*\((\d+)\)\s*$", name)
+    if match:
+        return match.group(1).rstrip(), int(match.group(2))
+    return name, None
+
+
+def load_bands(
+    markdown_path: Path, not_found_hint: str, skipped_hint: str
+) -> tuple[list[str], set[str], dict[str, int]]:
     bands: list[str] = []
     intentionally_skipped_from_file: set[str] = set()
+    track_overrides: dict[str, int] = {}
     for line in markdown_path.read_text(encoding="utf-8").splitlines():
         match = re.match(r"^\s*-\s+(.+?)\s*$", line)
         if match:
             raw_name = match.group(1)
             base_name = strip_status_hints(raw_name, not_found_hint, skipped_hint)
             base_name = strip_spotify_link(base_name)
+            base_name, override = parse_band_entry(base_name)
             bands.append(base_name)
+            if override is not None:
+                track_overrides[base_name] = override
             if skipped_hint and raw_name.endswith(skipped_hint):
                 intentionally_skipped_from_file.add(base_name)
-    return bands, intentionally_skipped_from_file
+    return bands, intentionally_skipped_from_file, track_overrides
 
 
 def update_bands_hints(
@@ -137,6 +150,25 @@ def update_bands_hints(
             updated_lines.append(f"{prefix}{base_name}{link}")
 
     markdown_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+
+
+def append_playlist_url(markdown_path: Path, playlist_url: str):
+    playlist_link_pattern = re.compile(r"^\[.*\]\(https://open\.spotify\.com/playlist/\w+\)$")
+    lines = markdown_path.read_text(encoding="utf-8").splitlines()
+
+    # Replace existing playlist link if present
+    replaced = False
+    for i, line in enumerate(lines):
+        if playlist_link_pattern.match(line.strip()):
+            lines[i] = f"[Spotify Playlist]({playlist_url})"
+            replaced = True
+            break
+
+    if not replaced:
+        lines.append("")
+        lines.append(f"[Spotify Playlist]({playlist_url})")
+
+    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def normalize_artist_query(name: str, intentionally_skipped_bands: set[str]) -> str:
@@ -219,9 +251,62 @@ def delete_existing_playlists(sp: spotipy.Spotify, user_id: str, name: str) -> i
     return deleted
 
 
+def find_existing_playlist(sp: spotipy.Spotify, user_id: str, name: str) -> dict | None:
+    normalized_target = normalize_playlist_name(name)
+    offset = 0
+    while True:
+        page = sp.current_user_playlists(limit=50, offset=offset)
+        items = page.get("items", [])
+        if not items:
+            return None
+        for playlist in items:
+            if (
+                playlist.get("owner", {}).get("id") == user_id
+                and normalize_playlist_name(playlist.get("name", "")) == normalized_target
+            ):
+                return playlist
+        if len(items) < 50:
+            return None
+        offset += 50
+
+
+def get_playlist_track_uris(sp: spotipy.Spotify, playlist_id: str) -> list[str]:
+    uris: list[str] = []
+    results = sp.playlist_tracks(playlist_id, fields="items.track.uri,next")
+    while results:
+        for item in results.get("items", []):
+            track = item.get("track")
+            if track and track.get("uri"):
+                uris.append(track["uri"])
+        if results.get("next"):
+            results = sp.next(results)
+        else:
+            break
+    return uris
+
+
+def replace_playlist_tracks(sp: spotipy.Spotify, playlist_id: str, uris: list[str], chunk_size: int):
+    sp.playlist_replace_items(playlist_id, uris[:100])
+    for i in range(100, len(uris), chunk_size):
+        sp.playlist_add_items(playlist_id, uris[i : i + chunk_size])
+
+
 def add_tracks_in_chunks(sp: spotipy.Spotify, playlist_id: str, uris: list[str], chunk_size: int):
     for i in range(0, len(uris), chunk_size):
         sp.playlist_add_items(playlist_id, uris[i : i + chunk_size])
+
+
+def upload_cover_image(sp: spotipy.Spotify, playlist_id: str, cover_image: Path):
+    image_bytes = cover_image.read_bytes()
+    if len(image_bytes) > 256 * 1024:
+        print(f"Warning: Cover image is {len(image_bytes) // 1024} KB (Spotify limit is 256 KB), skipping upload.")
+        return
+    try:
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        sp.playlist_upload_cover_image(playlist_id, image_b64)
+        print(f"Uploaded cover image: {cover_image.name}")
+    except spotipy.SpotifyException as e:
+        print(f"Warning: Failed to upload cover image: {e}")
 
 
 def main():
@@ -245,6 +330,7 @@ def main():
     token_cache_path = resolve_path(env_or_default("SPOTIFY_TOKEN_CACHE_PATH", ".spotify_cache"))
     shuffle_tracks = bool_env("SHUFFLE_TRACKS", "false")
     dry_run = bool_env("DRY_RUN", "false")
+    force_recreate = bool_env("FORCE_RECREATE", "false")
     playlist_description = env_or_default("PLAYLIST_DESCRIPTION", "")
 
     if not bands_file.exists():
@@ -272,7 +358,7 @@ def main():
     sp = spotipy.Spotify(auth_manager=auth)
     user_id = sp.current_user()["id"]
 
-    bands, intentionally_skipped_bands = load_bands(bands_file, not_found_hint, skipped_hint)
+    bands, intentionally_skipped_bands, track_overrides = load_bands(bands_file, not_found_hint, skipped_hint)
 
     all_track_uris: list[str] = []
     unresolved: list[str] = []
@@ -299,7 +385,8 @@ def main():
         if url:
             artist_urls[band] = url
 
-        artist_tracks = top_tracks_for_artist(sp, artist["id"], market=market, track_limit=track_limit)
+        band_track_limit = track_overrides.get(band, track_limit)
+        artist_tracks = top_tracks_for_artist(sp, artist["id"], market=market, track_limit=band_track_limit)
         if not artist_tracks:
             print(f"  [{i}/{len(bands)}] {band} — no tracks")
             unresolved.append(band)
@@ -337,9 +424,46 @@ def main():
     if not deduped_track_uris:
         raise SystemExit("No tracks found. Playlist was not created.")
 
-    deleted_count = delete_existing_playlists(sp, user_id, playlist_name)
-    if deleted_count:
-        print(f"Removed {deleted_count} existing playlist(s) named: {playlist_name}")
+    existing = find_existing_playlist(sp, user_id, playlist_name)
+
+    if existing and not force_recreate:
+        existing_uris = get_playlist_track_uris(sp, existing["id"])
+        playlist_id = existing["id"]
+        playlist_url = f"https://open.spotify.com/playlist/{playlist_id}"
+
+        if set(existing_uris) == set(deduped_track_uris):
+            if cover_image:
+                upload_cover_image(sp, playlist_id, cover_image)
+            append_playlist_url(bands_file, playlist_url)
+            matched_count = len(bands) - len(unresolved)
+            print(f"\nPlaylist unchanged: {playlist_name}")
+            print(f"URL: {playlist_url}")
+            print(f"\nSummary: {matched_count}/{len(bands)} artists matched, {len(deduped_track_uris)} tracks")
+            if unresolved:
+                print("\nArtists not resolved automatically:")
+                for name in unresolved:
+                    print(f"- {name}")
+            return
+
+        # Tracks changed — update in-place
+        replace_playlist_tracks(sp, playlist_id, deduped_track_uris, chunk_size)
+        if cover_image:
+            upload_cover_image(sp, playlist_id, cover_image)
+        append_playlist_url(bands_file, playlist_url)
+        matched_count = len(bands) - len(unresolved)
+        print(f"\nUpdated playlist: {playlist_name}")
+        print(f"URL: {playlist_url}")
+        print(f"\nSummary: {matched_count}/{len(bands)} artists matched, {len(deduped_track_uris)} tracks")
+        if unresolved:
+            print("\nArtists not resolved automatically:")
+            for name in unresolved:
+                print(f"- {name}")
+        return
+
+    if existing and force_recreate:
+        deleted_count = delete_existing_playlists(sp, user_id, playlist_name)
+        if deleted_count:
+            print(f"Force recreate: removed {deleted_count} existing playlist(s)")
 
     print("Creating playlist as: public")
 
@@ -347,18 +471,10 @@ def main():
     add_tracks_in_chunks(sp, playlist_id, deduped_track_uris, chunk_size)
 
     if cover_image:
-        image_bytes = cover_image.read_bytes()
-        if len(image_bytes) > 256 * 1024:
-            print(f"Warning: Cover image is {len(image_bytes) // 1024} KB (Spotify limit is 256 KB), skipping upload.")
-        else:
-            try:
-                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                sp.playlist_upload_cover_image(playlist_id, image_b64)
-                print(f"Uploaded cover image: {cover_image.name}")
-            except spotipy.SpotifyException as e:
-                print(f"Warning: Failed to upload cover image: {e}")
+        upload_cover_image(sp, playlist_id, cover_image)
 
     playlist_url = f"https://open.spotify.com/playlist/{playlist_id}"
+    append_playlist_url(bands_file, playlist_url)
     matched_count = len(bands) - len(unresolved)
     print(f"\nCreated playlist: {playlist_name}")
     print(f"URL: {playlist_url}")

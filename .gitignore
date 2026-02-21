@@ -17,3 +17,4 @@ venv/
 # Tool/editor noise
 .DS_Store
 .vscode/
+ocr_raw.md
