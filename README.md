@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon.png" width="128" alt="lineup2spotify icon"/>
+</p>
+
 # Spotify Playlist Generator (PKCE)
 
 Creates a Spotify playlist from a Markdown band list by adding the configured number of top tracks per band.
