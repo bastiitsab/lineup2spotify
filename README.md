@@ -6,6 +6,7 @@ Creates a Spotify playlist from a Markdown band list by adding the configured nu
 
 - Python 3
 - A Spotify Developer app (Client ID + Redirect URI)
+- macOS (only for the optional OCR step — uses Swift + Vision framework)
 
 ## Spotify Developer Setup
 
@@ -14,6 +15,24 @@ Creates a Spotify playlist from a Markdown band list by adding the configured nu
 3. Copy your **Client ID**
 4. In app settings, add this Redirect URI exactly:
     - `http://127.0.0.1:4202`
+
+## Extract bands from a lineup image (optional)
+
+If you have a festival lineup as an image, you can extract band names via OCR:
+
+```bash
+./extract_bands.sh <image> <output.md> "<Heading>"
+```
+
+Example:
+
+```bash
+./extract_bands.sh kh-heimspiel/2026/lineup.jpeg kh-heimspiel/2026/bands.md "Kärbholz Heimspiel 2026"
+```
+
+This creates a Markdown file with one band per line.
+
+> **Note:** The OCR output is raw and will include noise (URLs, dates, venue info, broken words). You need to manually review the file and clean it up — remove non-band lines, merge split names, and fix misspellings — before running the playlist generator.
 
 ## Configure `.env`
 
