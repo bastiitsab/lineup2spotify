@@ -21,13 +21,19 @@ Creates a Spotify playlist from a Markdown band list by adding the configured nu
 If you have a festival lineup as an image, you can extract band names via OCR:
 
 ```bash
-./extract_bands.sh <image> <output.md> "<Heading>"
+./extract_bands.sh <output.md> "<Heading>" <image1> [image2 ...]
 ```
 
 Example:
 
 ```bash
-./extract_bands.sh kh-heimspiel/2026/lineup.jpeg kh-heimspiel/2026/bands.md "Kärbholz Heimspiel 2026"
+./extract_bands.sh kh-heimspiel/2026/bands.md "Kärbholz Heimspiel 2026" kh-heimspiel/2026/lineup.jpeg
+```
+
+Multiple images (e.g. wave announcements) are merged into one file:
+
+```bash
+./extract_bands.sh bands.md "Festival 2026" wave1.jpeg wave2.jpeg
 ```
 
 This creates a Markdown file with one band per line.
@@ -59,6 +65,10 @@ SPOTIFY_SEARCH_LIMIT=5
 SPOTIFY_ADD_CHUNK_SIZE=100
 SPOTIFY_SCOPES=playlist-modify-private playlist-modify-public
 SPOTIFY_TOKEN_CACHE_PATH=.spotify_cache
+PLAYLIST_COVER_IMAGE=path/to/lineup.jpeg
+PLAYLIST_DESCRIPTION=Auto-generated festival playlist
+SHUFFLE_TRACKS=false
+DRY_RUN=false
 ```
 
 Relative paths are resolved from the script folder, for example:
@@ -79,6 +89,7 @@ What happens:
 - Derives playlist name from the first `#` heading in `bands.md`
 - Removes your existing playlist(s) with that derived playlist name
 - Creates a fresh public playlist
+- Uploads a cover image if `PLAYLIST_COVER_IMAGE` is set
 - Prints the playlist URL
 
 ## Notes
@@ -88,7 +99,12 @@ What happens:
 - The configured band list file is updated automatically with hints for:
   - no exact Spotify artist match
   - intentionally skipped bands
+- Spotify artist links are written into `bands.md` for each matched band.
 - Intentional skip control comes from `bands.md`: add the configured `SKIPPED_HINT_TEXT` to a band line to skip it.
+- Set `SHUFFLE_TRACKS=true` to randomize track order instead of grouping by artist.
+- Set `PLAYLIST_COVER_IMAGE` to upload a cover image (e.g. the lineup poster) to the playlist. The `ugc-image-upload` scope is added automatically.
+- Set `PLAYLIST_DESCRIPTION` to add a custom description to the playlist.
+- Set `DRY_RUN=true` to preview matched/unmatched artists and track counts without creating or modifying anything.
 - `.env` and `.spotify_cache` are ignored via `.gitignore` and should not be committed.
 
 ## Reuse for other festivals

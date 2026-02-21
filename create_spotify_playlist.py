@@ -1,4 +1,6 @@
+import base64
 import os
+import random
 import re
 from pathlib import Path
 
@@ -27,8 +29,12 @@ def int_env(name: str, default: str) -> int:
     raw = env_or_default(name, default)
     try:
         return int(raw)
-    except ValueError:
-        raise SystemExit(f"{name} must be a number, got: {raw}")
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be a number, got: {raw}") from exc
+
+
+def bool_env(name: str, default: str) -> bool:
+    return env_or_default(name, default).lower() in ("true", "1", "yes")
 
 
 def parse_scopes(value: str) -> str:
@@ -63,6 +69,10 @@ def strip_status_hints(name: str, not_found_hint: str, skipped_hint: str) -> str
     return name
 
 
+def strip_spotify_link(name: str) -> str:
+    return re.sub(r"\s*\[spotify\]\(https://open\.spotify\.com/artist/[a-zA-Z0-9]+\)", "", name).rstrip()
+
+
 def format_hint(hint: str) -> str:
     return f" {hint.lstrip()}" if hint else ""
 
@@ -89,6 +99,7 @@ def load_bands(markdown_path: Path, not_found_hint: str, skipped_hint: str) -> t
         if match:
             raw_name = match.group(1)
             base_name = strip_status_hints(raw_name, not_found_hint, skipped_hint)
+            base_name = strip_spotify_link(base_name)
             bands.append(base_name)
             if skipped_hint and raw_name.endswith(skipped_hint):
                 intentionally_skipped_from_file.add(base_name)
@@ -101,10 +112,12 @@ def update_bands_hints(
     intentionally_skipped: set[str],
     not_found_hint: str,
     skipped_hint: str,
+    artist_urls: dict[str, str] | None = None,
 ):
     updated_lines: list[str] = []
     not_found_hint_text = format_hint(not_found_hint)
     skipped_hint_text = format_hint(skipped_hint)
+    urls = artist_urls or {}
 
     for line in markdown_path.read_text(encoding="utf-8").splitlines():
         match = re.match(r"^(\s*-\s+)(.+?)\s*$", line)
@@ -114,12 +127,14 @@ def update_bands_hints(
 
         prefix, raw_name = match.groups()
         base_name = strip_status_hints(raw_name, not_found_hint, skipped_hint)
+        base_name = strip_spotify_link(base_name)
         if base_name in intentionally_skipped:
             updated_lines.append(f"{prefix}{base_name}{skipped_hint_text}")
         elif base_name in not_found_exact:
             updated_lines.append(f"{prefix}{base_name}{not_found_hint_text}")
         else:
-            updated_lines.append(f"{prefix}{base_name}")
+            link = f" [spotify]({urls[base_name]})" if base_name in urls else ""
+            updated_lines.append(f"{prefix}{base_name}{link}")
 
     markdown_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
 
@@ -157,8 +172,8 @@ def top_tracks_for_artist(sp: spotipy.Spotify, artist_id: str, market: str, trac
     return uris
 
 
-def create_playlist(sp: spotipy.Spotify, user_id: str, name: str) -> str:
-    playlist = sp.user_playlist_create(user=user_id, name=name, public=True)
+def create_playlist(sp: spotipy.Spotify, user_id: str, name: str, description: str = "") -> str:
+    playlist = sp.user_playlist_create(user=user_id, name=name, public=True, description=description)
     return playlist["id"]
 
 
@@ -221,8 +236,16 @@ def main():
     track_limit = int_env("TOP_TRACKS_PER_ARTIST", "5")
     search_limit = int_env("SPOTIFY_SEARCH_LIMIT", "5")
     chunk_size = int_env("SPOTIFY_ADD_CHUNK_SIZE", "100")
-    scopes = parse_scopes(env_or_default("SPOTIFY_SCOPES", "playlist-modify-private playlist-modify-public"))
+    cover_image_env = env_or_default("PLAYLIST_COVER_IMAGE", "")
+    cover_image = resolve_path(cover_image_env) if cover_image_env else None
+    scopes_raw = env_or_default("SPOTIFY_SCOPES", "playlist-modify-private playlist-modify-public")
+    if cover_image:
+        scopes_raw += " ugc-image-upload"
+    scopes = parse_scopes(scopes_raw)
     token_cache_path = resolve_path(env_or_default("SPOTIFY_TOKEN_CACHE_PATH", ".spotify_cache"))
+    shuffle_tracks = bool_env("SHUFFLE_TRACKS", "false")
+    dry_run = bool_env("DRY_RUN", "false")
+    playlist_description = env_or_default("PLAYLIST_DESCRIPTION", "")
 
     if not bands_file.exists():
         raise SystemExit(f"Bands file not found: {bands_file}")
@@ -233,6 +256,8 @@ def main():
         raise SystemExit("SPOTIFY_SEARCH_LIMIT must be > 0")
     if chunk_size <= 0:
         raise SystemExit("SPOTIFY_ADD_CHUNK_SIZE must be > 0")
+    if cover_image and not cover_image.exists():
+        raise SystemExit(f"Cover image not found: {cover_image}")
 
     playlist_name = derive_playlist_name(bands_file)
 
@@ -253,30 +278,61 @@ def main():
     unresolved: list[str] = []
     not_found_exact: set[str] = set()
     intentionally_skipped: set[str] = set()
+    artist_urls: dict[str, str] = {}
 
-    for band in bands:
+    for i, band in enumerate(bands, start=1):
         query = normalize_artist_query(band, intentionally_skipped_bands)
         if not query:
+            print(f"  [{i}/{len(bands)}] {band} — skipped")
             intentionally_skipped.add(band)
             unresolved.append(band)
             continue
 
         artist = pick_best_artist(sp, query, market, search_limit)
         if not artist:
+            print(f"  [{i}/{len(bands)}] {band} — not found")
             not_found_exact.add(band)
             unresolved.append(band)
             continue
 
+        url = artist.get("external_urls", {}).get("spotify", "")
+        if url:
+            artist_urls[band] = url
+
         artist_tracks = top_tracks_for_artist(sp, artist["id"], market=market, track_limit=track_limit)
         if not artist_tracks:
+            print(f"  [{i}/{len(bands)}] {band} — no tracks")
             unresolved.append(band)
             continue
 
+        print(f"  [{i}/{len(bands)}] {band} ✓ {len(artist_tracks)} tracks")
         all_track_uris.extend(artist_tracks)
 
-    update_bands_hints(bands_file, not_found_exact, intentionally_skipped, not_found_hint, skipped_hint)
-
     deduped_track_uris = list(dict.fromkeys(all_track_uris))
+
+    if shuffle_tracks:
+        random.shuffle(deduped_track_uris)
+
+    if dry_run:
+        matched_count = len(bands) - len(unresolved)
+        print("--- DRY RUN (no changes will be made) ---\n")
+        print(f"Playlist name: {playlist_name}")
+        print(f"Total tracks:  {len(deduped_track_uris)} (deduplicated)")
+        if shuffle_tracks:
+            print("Shuffle:       on")
+        if cover_image:
+            print(f"Cover image:   {cover_image}")
+        print(f"\nMatched {matched_count} / {len(bands)} artists")
+        if unresolved:
+            print("\nNot resolved:")
+            for name in unresolved:
+                if name in intentionally_skipped:
+                    print(f"  - {name} (intentionally skipped)")
+                else:
+                    print(f"  - {name} (no exact match)")
+        return
+
+    update_bands_hints(bands_file, not_found_exact, intentionally_skipped, not_found_hint, skipped_hint, artist_urls)
 
     if not deduped_track_uris:
         raise SystemExit("No tracks found. Playlist was not created.")
@@ -287,12 +343,26 @@ def main():
 
     print("Creating playlist as: public")
 
-    playlist_id = create_playlist(sp, user_id, playlist_name)
+    playlist_id = create_playlist(sp, user_id, playlist_name, playlist_description)
     add_tracks_in_chunks(sp, playlist_id, deduped_track_uris, chunk_size)
 
+    if cover_image:
+        image_bytes = cover_image.read_bytes()
+        if len(image_bytes) > 256 * 1024:
+            print(f"Warning: Cover image is {len(image_bytes) // 1024} KB (Spotify limit is 256 KB), skipping upload.")
+        else:
+            try:
+                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                sp.playlist_upload_cover_image(playlist_id, image_b64)
+                print(f"Uploaded cover image: {cover_image.name}")
+            except spotipy.SpotifyException as e:
+                print(f"Warning: Failed to upload cover image: {e}")
+
     playlist_url = f"https://open.spotify.com/playlist/{playlist_id}"
-    print(f"Created playlist: {playlist_name}")
+    matched_count = len(bands) - len(unresolved)
+    print(f"\nCreated playlist: {playlist_name}")
     print(f"URL: {playlist_url}")
+    print(f"\nSummary: {matched_count}/{len(bands)} artists matched, {len(deduped_track_uris)} tracks")
 
     if unresolved:
         print("\nArtists not resolved automatically:")

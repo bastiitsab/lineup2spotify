@@ -1,34 +1,35 @@
 #!/bin/bash
 set -euo pipefail
 
-# Extract band names from a festival lineup image using macOS Vision OCR.
-# Usage: ./extract_bands.sh <image> <output.md> <heading>
+# Extract band names from festival lineup image(s) using macOS Vision OCR.
+# Usage: ./extract_bands.sh <output.md> "<Heading>" <image1> [image2 ...]
 #
 # Arguments:
-#   image      Path to the lineup image (JPEG, PNG, etc.)
 #   output.md  Path to the Markdown file to create
 #   heading    First-line heading for the Markdown file (e.g. "Kärbholz Heimspiel 2026")
+#   image(s)   One or more lineup images (JPEG, PNG, etc.)
 #
 # Requires: macOS (uses Swift + Vision framework)
 
-if [[ $# -ne 3 ]]; then
-    echo "Usage: $0 <image> <output.md> <heading>" >&2
+if [[ $# -lt 3 ]]; then
+    echo "Usage: $0 <output.md> \"<Heading>\" <image1> [image2 ...]" >&2
     exit 1
 fi
 
-IMAGE="$1"
-OUTPUT="$2"
-HEADING="$3"
+OUTPUT="$1"
+HEADING="$2"
+shift 2
 
-if [[ ! -f "$IMAGE" ]]; then
-    echo "Error: image not found: $IMAGE" >&2
-    exit 1
-fi
-
-IMAGE_ABS="$(cd "$(dirname "$IMAGE")" && pwd)/$(basename "$IMAGE")"
+for img in "$@"; do
+    if [[ ! -f "$img" ]]; then
+        echo "Error: image not found: $img" >&2
+        exit 1
+    fi
+done
 
 SWIFT_SCRIPT=$(mktemp /tmp/ocr_XXXXXX.swift)
-trap 'rm -f "$SWIFT_SCRIPT"' EXIT
+OCR_TEMP=$(mktemp /tmp/ocr_out_XXXXXX.txt)
+trap 'rm -f "$SWIFT_SCRIPT" "$OCR_TEMP"' EXIT
 
 cat > "$SWIFT_SCRIPT" <<'SWIFT'
 import Foundation
@@ -58,8 +59,11 @@ for line in (request.results ?? []).compactMap({ $0.topCandidates(1).first?.stri
 }
 SWIFT
 
-echo "Running OCR on: $IMAGE"
-OCR_OUTPUT=$(swift "$SWIFT_SCRIPT" "$IMAGE_ABS")
+for img in "$@"; do
+    IMAGE_ABS="$(cd "$(dirname "$img")" && pwd)/$(basename "$img")"
+    echo "Running OCR on: $img"
+    swift "$SWIFT_SCRIPT" "$IMAGE_ABS" >> "$OCR_TEMP"
+done
 
 {
     echo "# $HEADING"
@@ -67,10 +71,10 @@ OCR_OUTPUT=$(swift "$SWIFT_SCRIPT" "$IMAGE_ABS")
     while IFS= read -r line; do
         trimmed=$(echo "$line" | xargs)
         [[ -n "$trimmed" ]] && echo "- $trimmed"
-    done <<< "$OCR_OUTPUT"
+    done < "$OCR_TEMP"
 } > "$OUTPUT"
 
-LINE_COUNT=$(grep -c '^- ' "$OUTPUT")
-echo "Wrote $LINE_COUNT bands to $OUTPUT"
+LINE_COUNT=$(grep -c '^- ' "$OUTPUT" || true)
+echo "Wrote $LINE_COUNT lines to $OUTPUT"
 echo ""
 echo "Review the file and clean up any OCR artifacts before running the playlist generator."
