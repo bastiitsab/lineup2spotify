@@ -6,6 +6,8 @@
 
 Creates a Spotify playlist from a Markdown band list by adding the configured number of top tracks per band.
 
+> **⚠️ Spotify API breaking changes (March 9, 2026):** Several endpoints used by this project are being removed or changed, including the critical `artist_top_tracks` endpoint. See [SPOTIFY_API_CHANGES.md](SPOTIFY_API_CHANGES.md) for the full impact analysis.
+
 ## Prerequisites
 
 - Python 3
